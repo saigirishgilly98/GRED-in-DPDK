@@ -61,6 +61,7 @@ struct rte_red_config {
 	uint32_t min_th;   /**< min_th scaled in fixed-point format */
 	uint32_t max_th;   /**< max_th scaled in fixed-point format */
 	uint32_t pa_const; /**< Precomputed constant value used for pa calculation (scaled in fixed-point format) */
+	uint32_t pg_const; /**< Precomputed constant value used for pg calculation (scaled in fixed-point format) */
 	uint8_t maxp_inv;  /**< maxp_inv */
 	uint8_t wq_log2;   /**< wq_log2 */
 };
@@ -301,6 +302,77 @@ __rte_red_drop(const struct rte_red_config *red_cfg, struct rte_red *red)
 	/* No drop */
 	return 0;
 }
+	
+/**
+ *  Drop probability for GRED(max_th < avg < 2 * max_th):
+ *
+ *     		max_th + (maxp_inv - 1) * (avg - max_th)
+ *	pb = ---------------------------------------------
+ *			(maxp_inv * max_th)
+ *
+ *     pa = pb / (2 - count * pb)
+ *
+ *
+ *                 	max_th + (maxp_inv - 1) * (avg - max_th)
+ *                   ---------------------------------------------
+ *                      	 (maxp_inv * max_th)
+ *     pa = ------------------------------------------------------------
+ *                count *  (max_th + (maxp_inv - 1) * (avg - max_th))
+ *           2 - -----------------------------------------------------
+ *                         (maxp_inv * max_th)
+ *
+ *
+ *           			(2 * max_th) + (maxp_inv * avg) - (maxp_inv * max_th) - avg
+ *     pa = -------------------------------------------------------------------------------------------------
+ *           (2 * maxp_inv * max_th) - count * ((2 * max_th) + (maxp_inv * avg) - (maxp_inv * max_th) - avg)
+ *
+ *
+ *  We define pg_const as: pg_const =  2 * maxp_inv * max_th. Then:
+ *
+ *
+ *                     (2 * max_th) + (maxp_inv * avg) - (maxp_inv * max_th) - avg
+ *     pa = ----------------------------------------------------------------------------------
+ *           pg_const - count * ((2 * max_th) + (maxp_inv * avg) - (maxp_inv * max_th) - avg)
+ */
+
+/**
+ * @brief make a decision to drop or enqueue a packet based on mark probability
+ *        criteria
+ *
+ * @param red_cfg [in] config pointer to structure defining RED parameters
+ * @param red [in,out] data pointer to RED runtime data
+ *
+ * @return operation status
+ * @retval 0 enqueue the packet
+ * @retval 1 drop the packet
+ */
+static inline int
+__rte_gred_drop(const struct rte_red_config *red_cfg, struct rte_red *red)
+{
+	uint32_t pa_num = 0;    /* numerator of drop-probability */
+	uint32_t pa_den = 0;    /* denominator of drop-probability */
+	uint32_t pa_num_count = 0;
+
+	pa_num = ((2 * red_cfg->max_th) + (maxp_inv * red->avg) - (maxp_inv * red_cfg->max_th) - red->avg) >> (red_cfg->wq_log2); 
+
+	pa_num_count = red->count * pa_num;
+
+	if (red_cfg->pg_const <= pa_num_count)
+		return 1;
+
+	pa_den = red_cfg->pg_const - pa_num_count;
+
+	/* If drop, generate and save random number to be used next time */
+	if (unlikely((rte_red_rand_val % pa_den) < pa_num)) {
+		rte_red_rand_val = rte_fast_rand();
+
+		return 1;
+	}
+
+	/* No drop */
+	return 0;
+}
+
 
 /**
  * @brief Decides if new packet should be enqeued or dropped in queue non-empty case
@@ -354,8 +426,19 @@ rte_red_enqueue_nonempty(const struct rte_red_config *red_cfg,
 		red->count = 0;
 		return 2;
 	}
+	
+	/* max_th <= avg < 2 * max_th: mark the packet with pa probability */
+	if(red->avg < 2 * red_cfg->max_th)
+		if(!__rte_gred_drop(red_cfg, red)) {
+			red->count ++;
+			return 0;
+		}
+		
+		red->count = 0;
+		return 2;
+	}
 
-	/* max_th <= avg: always mark the packet */
+	/* 2 * max_th <= avg: always mark the packet */
 	red->count = 0;
 	return 1;
 }
