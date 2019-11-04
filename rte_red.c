@@ -122,6 +122,7 @@ rte_red_config_init(struct rte_red_config *red_cfg,
 	red_cfg->min_th = ((uint32_t) min_th) << (wq_log2 + RTE_RED_SCALING);
 	red_cfg->max_th = ((uint32_t) max_th) << (wq_log2 + RTE_RED_SCALING);
 	red_cfg->pa_const = (2 * (max_th - min_th) * maxp_inv) << RTE_RED_SCALING;
+	red_cfg->pg_const = (2 * maxp_inv * max_th) << RTE_RED_SCALING;
 	red_cfg->maxp_inv = maxp_inv;
 	red_cfg->wq_log2 = wq_log2;
 
